@@ -1,0 +1,31 @@
+# ---- 构建输出 ----
+build/
+out/
+cmake-build-*/
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+
+# ---- 运行期生成 ----
+# 程序退出时写在 exe 同目录，属于本机配置，不该进版本库
+config.ini
+config.ini.bak
+*.log
+
+# ---- 编辑器 / IDE ----
+.vscode/
+.idea/
+*.user
+*.suo
+*.VC.db
+
+# ---- 系统垃圾 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 临时备份 ----
+*.bak
+*~

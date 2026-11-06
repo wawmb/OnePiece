@@ -1,0 +1,13 @@
+# 统一按 LF 存进仓库、按 LF 检出，避免 Windows 上的 CRLF 转换
+# 让每次改动都显示成"整个文件都被修改"
+* text=auto eol=lf
+
+# 二进制文件，禁止任何换行符处理与文本 diff
+*.ico   binary
+*.png   binary
+*.dll   binary
+*.lib   binary
+*.exe   binary
+
+# 第三方源码保持原样，不参与语言统计
+external/imgui/** linguist-vendored

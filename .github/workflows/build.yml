@@ -1,0 +1,155 @@
+# ============================================================
+# 自动编译工作流
+#
+# 触发：
+#   - push 到任意分支、向任意分支发 PR  → 只编译并上传 artifact（不会建 Release）
+#   - 推 v* 标签（如 v2.0）            → 编译通过后额外创建 Release 并附上产物
+#   - 手动（Actions 页 Run workflow）   → 同普通 push，不建 Release
+#
+# Release 只有在「打 v* 标签 且 build 两条工具链全部成功」时才会出现；
+# 普通 push 请到 Actions 页该次运行底部的 Artifacts 下载。
+#
+# 两条工具链并行编译，互不影响（fail-fast: false）：
+#   mingw → MSYS2 UCRT64 + g++（本地日常使用的工具链）
+#   msvc  → Visual Studio 2022 的 cl.exe（体积更小、静态 CRT）
+#
+# 说明：external/interception/ 下的 dll 与 lib 不是构建产物，
+#       必须随仓库提交，否则 CMake 在配置阶段就会因「缺少必要文件」失败。
+# ============================================================
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# softprops/action-gh-release 需要写权限才能创建 Release
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.toolchain }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: mingw
+            artifact: OnePiece-mingw
+          - toolchain: msvc
+            artifact: OnePiece-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------- 工具链准备 ----------------
+      - name: Setup MSYS2 (MinGW-w64 UCRT64)
+        if: matrix.toolchain == 'mingw'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Setup MSVC (x64)
+        if: matrix.toolchain == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # 运行器一般已自带 ninja，这里只做兜底
+      - name: Ensure Ninja (MSVC)
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+
+      # ---------------- 配置 + 编译 ----------------
+      # 必须是单配置生成器（Ninja）：工程用「相对 build 目录」的路径来绕开
+      # 中文路径问题，多配置生成器会把产物放进 build/Release 导致路径错位。
+      - name: Build (MinGW)
+        if: matrix.toolchain == 'mingw'
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          ls -la build/OnePiece.exe build/interception.dll
+
+      - name: Build (MSVC)
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cmake --build build
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem build/OnePiece.exe, build/interception.dll | Select-Object Name, Length
+
+      # ---------------- 产物 ----------------
+      # exe 与 dll 必须同目录，所以一起打包
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            build/OnePiece.exe
+            build/interception.dll
+          if-no-files-found: error
+          retention-days: 30
+
+  # 只有打 v* 标签才跑，把两条工具链的产物附到 Release 上。
+  # 注意：标签对应的那次运行一旦失败，GitHub 不会因为后续修好而自动重跑；
+  # 需要把该 tag 移到修复提交上再推送（git tag -f v2.0 && git push -f origin v2.0）。
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'OnePiece-*'
+          merge-multiple: false
+          path: dist
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          dirs=( */ )
+          # 两条工具链的产物缺一不可，少了就在这里直接失败并打印实际内容
+          if [ ${#dirs[@]} -ne 2 ]; then
+            echo "::error::需要 mingw / msvc 两份构建产物，实际只有 ${#dirs[@]} 份"
+            find . -maxdepth 2 -type f -print
+            exit 1
+          fi
+          for d in "${dirs[@]}"; do
+            n="${d%/}"
+            ( cd "$n" && zip -r -q "../${n}.zip" . )
+            test -s "${n}.zip"
+          done
+          ls -lh ./*.zip
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          draft: false
+          # 附件没匹配上时直接失败，避免「Release 建了但里面空空如也」
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
